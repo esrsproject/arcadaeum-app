@@ -26,7 +26,7 @@ from app.routes import (
     news,
     posts,
 )
-from app.services.cache import add_default_users, cache_popular_games, get_game_news
+from app.services.cache import cache_popular_games, get_game_news
 from app.services.scheduler import start_steam_sync_scheduler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -48,8 +48,6 @@ async def lifespan(_app: FastAPI):
     global scheduler_task
 
     create_tables()
-    default_users_result = add_default_users()
-    print(f"Startup users result: {default_users_result}")
     cache_result = cache_popular_games(limit=500)
     print(f"Startup cache result: {cache_result}")
     try:

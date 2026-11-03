@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from datetime import timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from authlib.integrations.base_client.errors import OAuthError
@@ -43,6 +43,9 @@ from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+PROFILE_IMAGE_HOSTS = {"lh3.googleusercontent.com"}
+PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 
 @router.get("/me", response_model=User)
@@ -187,19 +190,60 @@ async def google_callback(request: Request) -> RedirectResponse:
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
 
-    return RedirectResponse(url=f"{frontend_url}/auth/callback?token={access_token}")
+    request.session["oauth_access_token"] = access_token
+    return RedirectResponse(url=f"{frontend_url}/auth/callback")
+
+
+@router.post("/auth/oauth/google/exchange", response_model=Token)
+async def exchange_google_oauth_token(request: Request) -> Token:
+    """Exchange the short-lived OAuth session result exactly once."""
+    access_token = request.session.pop("oauth_access_token", None)
+    if not isinstance(access_token, str):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No pending Google sign-in was found",
+        )
+    return Token(access_token=access_token, token_type="bearer")
 
 
 # Temporary endpoint to avoid google rate limits
 @router.get("/proxy/profile-image")
 async def proxy_profile_image(url: str) -> Response:
-    async with httpx.AsyncClient() as client:
-        r = await client.get(url)
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            media_type=r.headers.get("content-type", "image/jpeg"),
-        )
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in PROFILE_IMAGE_HOSTS:
+        raise HTTPException(status_code=400, detail="Unsupported profile image URL")
+
+    timeout = httpx.Timeout(5.0, connect=3.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        async with client.stream("GET", url) as upstream:
+            if upstream.status_code != 200:
+                raise HTTPException(status_code=502, detail="Profile image fetch failed")
+
+            content_type = upstream.headers.get("content-type", "").split(";", 1)[0]
+            if not content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=415,
+                    detail="Profile image URL did not return an image",
+                )
+
+            content_length = upstream.headers.get("content-length")
+            try:
+                declared_size = int(content_length) if content_length else None
+            except ValueError:
+                declared_size = None
+            if declared_size is not None and declared_size > PROFILE_IMAGE_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Profile image is too large",
+                )
+
+            body = bytearray()
+            async for chunk in upstream.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > PROFILE_IMAGE_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="Profile image is too large")
+
+    return Response(content=bytes(body), media_type=content_type)
 
 
 # ── Password reset ─────────────────────────────────────────────────

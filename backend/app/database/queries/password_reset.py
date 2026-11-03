@@ -1,7 +1,13 @@
+import hashlib
 from datetime import datetime
 from typing import Optional
 
 from app.database import get_database_connection
+
+
+def _hash_reset_token(token: str) -> str:
+    """Return the non-reversible digest stored for a password reset token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def create_password_reset_table() -> None:
@@ -33,7 +39,7 @@ def create_password_reset_token(user_id: int, token: str, expires_at: datetime) 
                     INSERT INTO password_reset_tokens (user_id, token, expires_at)
                     VALUES (%s, %s, %s)
                     """,
-                    (user_id, token, expires_at),
+                    (user_id, _hash_reset_token(token), expires_at),
                 )
                 conn.commit()
                 return True
@@ -51,7 +57,7 @@ def get_password_reset_token(token: str) -> Optional[dict]:
                 SELECT id, user_id, expires_at, used FROM password_reset_tokens
                 WHERE token = %s AND expires_at > CURRENT_TIMESTAMP AND used = false
                 """,
-                (token,),
+                (_hash_reset_token(token),),
             )
             row = cur.fetchone()
             if row:
